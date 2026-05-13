@@ -1,5 +1,5 @@
 import time
-import ophir_sol
+import ex1_331050591
 import search as search
 import utils as utils
 
@@ -16,7 +16,7 @@ def run_problem(func, targs=(), kwargs=None):
 
 def solve_problems(problem):
     try:
-        p = ophir_sol.create_elevators_problem(problem)
+        p = ex1_331050591.create_elevators_problem(problem)
     except Exception as e:
         print("Error creating problem: ", e)
         return None
