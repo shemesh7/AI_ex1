@@ -4,8 +4,8 @@ import utils as utils
 import heapq
 from collections import deque
 
-# AI disclosure: Used Claude Sonnet 4.6 throughout. BFS heuristic, strict_move_lb,
-# useful_move_targets, and fast A* driver are adapted from Ophir's approach.
+# AI: Used Claude Sonnet 4.6 for code review and improvments.
+# fast A* driver is adapted from Ophir's approach.
 id = ["No numbers - I'm special!"]
 
 INF = float('inf')

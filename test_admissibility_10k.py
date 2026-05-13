@@ -33,7 +33,7 @@ import sys
 import heapq
 from collections import deque, Counter
 
-import ex1
+import ex1_331050591
 import search
 from search import Node
 
@@ -604,7 +604,7 @@ def test_single(name, init_dict, known_opt, stats, do_exhaustive=True,
     t_start = time.time()
 
     try:
-        prob_ucs = ex1.create_elevators_problem(init_dict)
+        prob_ucs = ex1_331050591.create_elevators_problem(init_dict)
     except Exception as e:
         if verbose:
             print(f"  [{name}] ERROR creating problem: {e}")
@@ -635,7 +635,7 @@ def test_single(name, init_dict, known_opt, stats, do_exhaustive=True,
 
     # ── Solve with A* ──
     try:
-        prob_astar = ex1.create_elevators_problem(init_dict)
+        prob_astar = ex1_331050591.create_elevators_problem(init_dict)
         astar_result = solve_astar(prob_astar)
     except Exception as e:
         if verbose:
@@ -720,7 +720,7 @@ def test_single(name, init_dict, known_opt, stats, do_exhaustive=True,
         return
 
     try:
-        prob_exh = ex1.create_elevators_problem(init_dict)
+        prob_exh = ex1_331050591.create_elevators_problem(init_dict)
         hstar = compute_true_hstar(prob_exh, max_states=max_states_exhaustive)
     except Exception:
         return
@@ -732,7 +732,7 @@ def test_single(name, init_dict, known_opt, stats, do_exhaustive=True,
     num_states = len(hstar)
     stats.exhaustive_states_checked += num_states
 
-    prob_check = ex1.create_elevators_problem(init_dict)
+    prob_check = ex1_331050591.create_elevators_problem(init_dict)
     violations = 0
     worst_overest = 0
     worst_state = None

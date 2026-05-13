@@ -1,5 +1,5 @@
 import time
-import ex1
+import ex1_331050591
 import search as search
 import utils as utils
 
@@ -16,7 +16,7 @@ def run_problem(func, targs=(), kwargs=None):
 
 def solve_problems(problem, expected_optimal=None):
     try:
-        p = ex1.create_elevators_problem(problem)
+        p = ex1_331050591.create_elevators_problem(problem)
     except Exception as e:
         return False, False, "ERROR", None
 
