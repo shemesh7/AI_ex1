@@ -1,70 +1,12 @@
 import ex1_check
 import search as search
 import utils as utils
-import heapq
 from collections import deque
 
-# AI: Used Claude Sonnet 4.6 for code review and improvments.
-# fast A* driver is adapted from Ophir's approach.
+# AI: Used Claude Sonnet 4.6 for implementing some of my ideas, code review and improvements.
 id = ["No numbers - I'm special!"]
 
 INF = float('inf')
-
-
-# ── Fast A* driver ────────────────────────────────────────────────────────────
-def _fast_astar(problem, h=None):
-    """A* with:
-    - heapq  (O(log n) vs O(n) bisect.insort in the stock PriorityQueue)
-    - g_best dedup  (push a child only when it strictly improves the best
-                     known g; stale pops are discarded immediately)
-    - h tie-break   (among equal-f nodes prefer smaller h — closer to goal)
-    - pathmax       (child.f ≥ parent.f restores monotonicity along paths,
-                     so with admissible h the first pop of a state is optimal)
-    """
-    if h is None:
-        h = problem.h
-    Node = search.Node
-
-    root = Node(problem.initial)
-    h0 = h(root)
-    root.f = h0
-
-    heap = [(h0, h0, 0, root)]   # (f, h, counter, node)
-    g_best = {problem.initial: 0}
-    expanded = 0
-    ctr = 0
-    _pop = heapq.heappop
-    _push = heapq.heappush
-    succ = problem.successor
-    goal = problem.goal_test
-
-    while heap:
-        _, _, _, node = _pop(heap)
-        s = node.state
-        g = node.path_cost
-        if g_best.get(s, INF) < g:   # stale entry
-            continue
-        if goal(s):
-            return node, expanded
-        expanded += 1
-        new_g = g + 1
-        pf = node.f
-        for action, ns in succ(s):
-            if g_best.get(ns, INF) <= new_g:
-                continue
-            g_best[ns] = new_g
-            child = Node(ns, node, action, new_g)
-            ch = h(child)
-            cf = new_g + ch
-            if cf < pf:
-                cf = pf          # pathmax
-            child.f = cf
-            ctr += 1
-            _push(heap, (cf, ch, ctr, child))
-    return None
-
-
-search.astar_search = _fast_astar
 
 
 # ── Problem ───────────────────────────────────────────────────────────────────
