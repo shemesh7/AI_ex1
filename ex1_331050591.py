@@ -4,7 +4,7 @@ import utils as utils
 from collections import deque
 
 # AI: Used Claude Sonnet 4.6 for implementing some of my ideas, code review and improvements.
-id = ["No numbers - I'm special!"]
+id = ["331050591"]
 
 INF = float('inf')
 
@@ -41,6 +41,8 @@ class ElevatorsProblem(search.Problem):
         # ── Static elevator data ──────────────────────────────────────────
         e_reach = [list(initial['Elevators'][eid][1]) for eid in self.e_ids]
         self.e_capacity = tuple(initial['Elevators'][eid][2] for eid in self.e_ids)
+        e_init_floors = tuple(initial['Elevators'][eid][0] for eid in self.e_ids)
+        e_reach_sets  = [frozenset(r) for r in e_reach]
 
         # ── Static person data ────────────────────────────────────────────
         self.p_weights = tuple(initial['Persons'][pid][1] for pid in self.p_ids)
@@ -65,6 +67,13 @@ class ElevatorsProblem(search.Problem):
                 for f in e_reach[i]:
                     adj[f].append(e_node)
                     adj[e_node].append(f)
+                # Virtual edge: initial floor not in normal reach (chain elevators).
+                # Makes h_costs finite so A* can find a path; heuristic still
+                # admissible (underestimates at worst).
+                init_f = e_init_floors[i]
+                if init_f not in e_reach_sets[i]:
+                    adj[init_f].append(e_node)
+                    adj[e_node].append(init_f)
             dist = [INF] * num_nodes
             dist[goal_f] = 0
             q = deque([goal_f])
@@ -78,38 +87,58 @@ class ElevatorsProblem(search.Problem):
             h_costs.append(tuple(dist))
         self.h_costs = tuple(h_costs)
 
-        # elev_useful[j][i] = True iff elevator i can help person j reach goal
-        # (BFS distance from elevator-node to goal is finite).
-        self.elev_useful = tuple(
-            tuple(h_costs[j][ELEV_OFFSET + i] < INF for i in range(n_e))
-            for j in range(n_p)
-        )
+        # ── Bitmask structures for fast successor generation ──────────────
 
-        # ── Useful MOVE targets ───────────────────────────────────────────
-        # An elevator never needs to visit a floor that is not:
-        #   (a) a start floor of any person,
-        #   (b) a goal floor of any person, or
-        #   (c) a transfer floor (reachable by ≥ 2 elevators, needed for relay).
-        # Any MOVE to a floor outside this set can be deleted from an optimal
-        # plan without increasing its cost.
-        person_floors = set(p_starts) | set(self.p_goals)
-        floor_count   = [0] * (height + 1)
+        # e_reach_mask[i] = bitmask of all floors reachable by elevator i
+        e_reach_mask = [0] * n_e
         for i in range(n_e):
             for f in e_reach[i]:
                 if 0 <= f <= height:
-                    floor_count[f] += 1
-        transfer    = {f for f in range(height + 1) if floor_count[f] >= 2}
-        useful_glob = person_floors | transfer
+                    e_reach_mask[i] |= 1 << f
+        self.e_reach_mask = tuple(e_reach_mask)
 
-        self.useful_targets = tuple(
-            tuple(f for f in e_reach[i] if f in useful_glob)
-            for i in range(n_e)
-        )
-        self.useful_sets = tuple(
-            frozenset(self.useful_targets[i]) for i in range(n_e)
-        )
+        # source_covers[j][f] = bitmask of elevator indices i such that:
+        #   - elevator i can reach floor f
+        #   - h_costs[j][e_node_i] == h_costs[j][f] - 1  (i is on BFS path)
+        # Used in MOVE (elevator should come to floor f) and ENTER (only
+        # enter an elevator that is on the optimal BFS path).
+        source_covers = []
+        for j in range(n_p):
+            row = [0] * (height + 1)
+            for f in range(height + 1):
+                hf = h_costs[j][f]
+                if hf == INF or hf == 0:
+                    continue
+                target = hf - 1
+                for i in range(n_e):
+                    if (e_reach_mask[i] >> f) & 1 and h_costs[j][ELEV_OFFSET + i] == target:
+                        row[f] |= 1 << i
+            source_covers.append(tuple(row))
+        self.source_covers = tuple(source_covers)
 
-        # ── Precomputed action strings ─────────────────────────────────
+        # exit_floors_mask[j][i] = bitmask of floors where person j should
+        # exit elevator i on the BFS optimal path:
+        #   h_costs[j][f] == h_costs[j][e_node_i] - 1
+        # Restricting exits to this set prunes all suboptimal EXIT actions.
+        exit_floors_mask = []
+        for j in range(n_p):
+            row = [0] * n_e
+            for i in range(n_e):
+                d = h_costs[j][ELEV_OFFSET + i]
+                if d == INF or d == 0:
+                    continue
+                target = d - 1
+                for f in e_reach[i]:
+                    if 0 <= f <= height and h_costs[j][f] == target:
+                        row[i] |= 1 << f
+            exit_floors_mask.append(tuple(row))
+        self.exit_floors_mask = tuple(exit_floors_mask)
+
+        # LSB_MAP: power-of-2 → exponent, for fast bitmask iteration
+        max_bits = max(height + 1, n_e, n_p) + 1
+        self.LSB_MAP = {1 << k: k for k in range(max_bits)}
+
+        # ── Precomputed action strings ────────────────────────────────────
         # Building f-strings inside the successor hot path is measurably slow.
         move_str = []
         for i in range(n_e):
@@ -129,69 +158,88 @@ class ElevatorsProblem(search.Problem):
             for j in range(n_p)
         )
 
-        # ── Initial state ─────────────────────────────────────────────
-        e_floors = tuple(initial['Elevators'][eid][0] for eid in self.e_ids)
-        search.Problem.__init__(self, e_floors + p_starts)
+        # ── Initial state ─────────────────────────────────────────────────
+        search.Problem.__init__(self, e_init_floors + p_starts)
 
     # ── successor ─────────────────────────────────────────────────────────────
     def successor(self, state):
         """
         Pruning rules (each preserves at least one optimal plan):
-          MOVE  – only to useful_targets floors (not start/goal/transfer → useless).
-               – skip entirely for an empty elevator when no waiting person
-                 is at any of its useful targets.
-          EXIT  – skip if h_costs[j][exit_floor] == INF (person can never
-                  reach their goal from that floor; no optimal plan uses it).
-          ENTER – skip if person is already at goal floor.
-               – skip if elevator is structurally useless for person j
-                 (h_costs[j][elevator_node] == INF).
-               – skip if weight would exceed capacity.
+
+          MOVE  – dynamic allowed_move_mask[i]: only floors that elevator i
+                  actually needs to reach in this state:
+                  • exit floors for current passengers (on BFS optimal path)
+                  • floor of each waiting person whose BFS path goes through i
+                  This is far tighter than a static source/goal/transfer set.
+
+          EXIT  – only at floors in exit_floors_mask[j][i] (BFS-optimal exits).
+                  Exiting at a non-optimal floor raises h_costs and is never
+                  part of an optimal plan.
+                  Special case: if person is at their goal inside elevator,
+                  force immediate exit (return only that action).
+
+          ENTER – only onto elevators in source_covers[j][loc] (BFS-path
+                  elevators). Entering a non-path elevator raises h_costs.
+                  Also skip if over capacity.
         """
         n_e = self.n_e
         n_p = self.n_p
-        ELEV_OFFSET  = self.ELEV_OFFSET
-        e_floors     = state[:n_e]
-        p_locs       = state[n_e:]
-        h_costs      = self.h_costs
-        p_weights    = self.p_weights
-        p_goals      = self.p_goals
-        e_capacity   = self.e_capacity
-        elev_useful  = self.elev_useful
-        useful_tgts  = self.useful_targets
-        useful_sets  = self.useful_sets
-        move_str     = self.move_str
-        enter_str    = self.enter_str
-        exit_str     = self.exit_str
+        ELEV_OFFSET      = self.ELEV_OFFSET
+        e_floors         = state[:n_e]
+        p_locs           = state[n_e:]
+        p_goals          = self.p_goals
+        p_weights        = self.p_weights
+        e_capacity       = self.e_capacity
+        source_covers    = self.source_covers
+        exit_floors_mask = self.exit_floors_mask
+        e_reach_mask     = self.e_reach_mask
+        LSB_MAP          = self.LSB_MAP
+        move_str         = self.move_str
+        enter_str        = self.enter_str
+        exit_str         = self.exit_str
 
-        # Current weight per elevator + whether it has any passenger.
-        e_weights  = [0] * n_e
-        e_occupied = [False] * n_e
+        h_costs           = self.h_costs
+        e_weights         = [0] * n_e
+        allowed_move_mask = [0] * n_e
+        successors        = []
+
         for j in range(n_p):
             loc = p_locs[j]
+            g   = p_goals[j]
             if loc >= ELEV_OFFSET:
                 ei = loc - ELEV_OFFSET
-                e_weights[ei]  += p_weights[j]
-                e_occupied[ei]  = True
+                f  = e_floors[ei]
+                if f == g:
+                    # Person is at goal inside elevator — force immediate exit.
+                    # Delaying is never beneficial with unit costs.
+                    idx = n_e + j
+                    return [(exit_str[j][ei], state[:idx] + (f,) + state[idx + 1:])]
+                e_weights[ei] += p_weights[j]
+                allowed_move_mask[ei] |= exit_floors_mask[j][ei]
+            elif loc != g:
+                cov = source_covers[j][loc]
+                if cov:
+                    bit = 1 << loc
+                    m = cov
+                    while m:
+                        lsb = m & -m
+                        allowed_move_mask[LSB_MAP[lsb]] |= bit
+                        m ^= lsb
 
-        # Floors with at least one waiting (not in elevator, not done) person.
-        waiting_floors = set()
-        for j in range(n_p):
-            loc = p_locs[j]
-            if loc < ELEV_OFFSET and loc != p_goals[j]:
-                waiting_floors.add(loc)
-
-        successors = []
-
-        # ── MOVE ────────────────────────────────────────────────────────
+        # ── MOVE ─────────────────────────────────────────────────────────
         for i in range(n_e):
-            # Empty elevator: skip if no waiting person at any useful target.
-            if not e_occupied[i] and not (useful_sets[i] & waiting_floors):
+            mask = allowed_move_mask[i] & e_reach_mask[i] & ~(1 << e_floors[i])
+            if not mask:
                 continue
-            cur = e_floors[i]
-            mrow = move_str[i]
-            for f in useful_tgts[i]:
-                if f != cur:
-                    successors.append((mrow[f], state[:i] + (f,) + state[i + 1:]))
+            mrow   = move_str[i]
+            prefix = state[:i]
+            suffix = state[i + 1:]
+            m = mask
+            while m:
+                lsb = m & -m
+                target = LSB_MAP[lsb]
+                successors.append((mrow[target], prefix + (target,) + suffix))
+                m ^= lsb
 
         # ── EXIT ─────────────────────────────────────────────────────────
         for j in range(n_p):
@@ -200,27 +248,47 @@ class ElevatorsProblem(search.Problem):
                 continue
             ei = loc - ELEV_OFFSET
             f  = e_floors[ei]
-            if h_costs[j][f] == INF:   # unreachable exit floor
-                continue
-            idx = n_e + j
-            successors.append((exit_str[j][ei], state[:idx] + (f,) + state[idx + 1:]))
+            if (exit_floors_mask[j][ei] >> f) & 1:
+                idx = n_e + j
+                successors.append((exit_str[j][ei], state[:idx] + (f,) + state[idx + 1:]))
 
         # ── ENTER ────────────────────────────────────────────────────────
         for j in range(n_p):
             loc = p_locs[j]
-            if loc >= ELEV_OFFSET:
-                continue   # already in elevator
-            if loc == p_goals[j]:
-                continue   # at goal — entering would only add steps
-            pw  = p_weights[j]
-            eur = elev_useful[j]
-            for i in range(n_e):
+            if loc >= ELEV_OFFSET or loc == p_goals[j]:
+                continue
+            pw    = p_weights[j]
+            cov_j = source_covers[j][loc]
+            m     = cov_j
+            while m:
+                lsb = m & -m
+                i   = LSB_MAP[lsb]
+                m  ^= lsb
                 if e_floors[i] != loc:
                     continue
-                if not eur[i]:
-                    continue   # elevator structurally can't help person j
                 if e_weights[i] + pw > e_capacity[i]:
-                    continue   # overweight
+                    continue
+                idx = n_e + j
+                successors.append((enter_str[j][i],
+                                   state[:idx] + (ELEV_OFFSET + i,) + state[idx + 1:]))
+            # Fallback: elevator physically at loc but loc not in its reach
+            # (e.g. elevator initialised at a non-stop floor).
+            # Allow ENTER when it is still BFS-optimal (h drops by exactly 1).
+            h_loc = h_costs[j][loc]
+            if h_loc < 2:
+                continue
+            for i in range(n_e):
+                if (cov_j >> i) & 1:
+                    continue
+                if e_floors[i] != loc:
+                    continue
+                if (e_reach_mask[i] >> loc) & 1:
+                    continue  # in reach — already handled by cov_j
+                d_ei = h_costs[j][ELEV_OFFSET + i]
+                if d_ei == INF or d_ei != h_loc - 1:
+                    continue
+                if e_weights[i] + pw > e_capacity[i]:
+                    continue
                 idx = n_e + j
                 successors.append((enter_str[j][i],
                                    state[:idx] + (ELEV_OFFSET + i,) + state[idx + 1:]))
@@ -229,8 +297,6 @@ class ElevatorsProblem(search.Problem):
 
     # ── goal_test ─────────────────────────────────────────────────────────────
     def goal_test(self, state):
-        # All person locations must equal their goal floors (< ELEV_OFFSET),
-        # so this also implicitly checks that no one is still inside an elevator.
         return state[self.n_e:] == self.p_goals
 
     # ── h_astar ───────────────────────────────────────────────────────────────
@@ -246,35 +312,33 @@ class ElevatorsProblem(search.Problem):
         strict_move_lb = #uncovered required floors
             A floor F is *required* if an unfinished person is waiting
             there (source) or must be delivered there (goal).
-            F is *covered* iff at least one of:
-              (a) source-cover: an elevator currently at F lies on a BFS
-                  shortest path for some person waiting at F
-                  [h_costs[j][elev_node] == h_costs[j][F] − 1]
-              (b) goal-cover: a person whose goal is F is inside an
-                  elevator that is currently at F.
-            If F is uncovered, at least 1 future MOVE must bring some
-            elevator to F. One MOVE visits exactly one floor.
-            → strict_move_lb ≤ actual remaining MOVE count.
+            F is *covered* iff BOTH:
+              (a) src_covered: no waiting person at F, OR some elevator
+                  currently at F is on the BFS shortest path for a
+                  waiting person [source_covers[j][F] & elevs_at_mask[F]]
+              (b) goal_covered: no delivery target for F, OR the target
+                  person is already inside an elevator sitting at F.
+            AND (not OR) is required: OR would let a single EXIT reduce
+            both transfer_lb and strict_move_lb simultaneously, violating
+            consistency.
 
         The two terms bound disjoint action types (ENTER+EXIT vs MOVE),
         so their sum is a valid lower bound on the total remaining cost.
-        Consistency (h(s) ≤ 1 + h(s') for every action) can be verified
-        per action type: each action changes h by at most 1.
         """
-        n_e      = self.n_e
-        n_p      = self.n_p
+        n_e         = self.n_e
+        n_p         = self.n_p
         ELEV_OFFSET = self.ELEV_OFFSET
         height_p1   = self.height + 1
-        state    = node.state
-        e_floors = state[:n_e]
-        p_locs   = state[n_e:]
-        h_costs  = self.h_costs
-        p_goals  = self.p_goals
+        state       = node.state
+        e_floors    = state[:n_e]
+        p_locs      = state[n_e:]
+        h_costs     = self.h_costs
+        p_goals     = self.p_goals
+        source_covers = self.source_covers
 
         h_val = 0
-        # Floor-indexed arrays avoid dict overhead in the inner loop.
-        src_req  = [None] * height_p1   # src_req[f]  = [j, …] waiting at f
-        goal_req = [None] * height_p1   # goal_req[f] = [j, …] with goal f
+        src_req  = [None] * height_p1
+        goal_req = [None] * height_p1
         any_unfinished = False
 
         for j in range(n_p):
@@ -283,7 +347,7 @@ class ElevatorsProblem(search.Problem):
             g = p_goals[j]
             if loc != g:
                 any_unfinished = True
-                if loc < ELEV_OFFSET:          # person waiting on floor
+                if loc < ELEV_OFFSET:
                     if src_req[loc] is None:
                         src_req[loc] = [j]
                     else:
@@ -296,15 +360,12 @@ class ElevatorsProblem(search.Problem):
         if not any_unfinished:
             return h_val
 
-        # Group elevator indices by current floor (floor-indexed list).
-        elevs_at = [None] * height_p1
+        # Bitmask of elevator indices at each floor (O(1) coverage check).
+        elevs_at_mask = [0] * height_p1
         for i in range(n_e):
             f = e_floors[i]
             if 0 <= f < height_p1:
-                if elevs_at[f] is None:
-                    elevs_at[f] = [i]
-                else:
-                    elevs_at[f].append(i)
+                elevs_at_mask[f] |= 1 << i
 
         uncovered = 0
         for f in range(height_p1):
@@ -313,28 +374,15 @@ class ElevatorsProblem(search.Problem):
             if srcs is None and gs is None:
                 continue
 
-            # A floor is covered only when BOTH its requirements are met:
-            #   src_covered: no waiting person, or some elevator at f is on a
-            #                BFS shortest path for a waiting person (they can
-            #                enter without a future MOVE).
-            #   goal_covered: no delivery target, or the target person is
-            #                 already inside an elevator sitting at f (EXIT
-            #                 suffices, no future MOVE needed).
-            # Using OR (old) lets EXIT reduce strict_move_lb and transfer_lb
-            # simultaneously, violating consistency.  AND avoids that.
             src_covered  = srcs is None
             goal_covered = gs is None
 
             if not src_covered:
-                e_list = elevs_at[f]
-                if e_list is not None:
-                    for i in e_list:
-                        e_node = ELEV_OFFSET + i
-                        for j in srcs:
-                            if h_costs[j][e_node] == h_costs[j][f] - 1:
-                                src_covered = True
-                                break
-                        if src_covered:
+                eam = elevs_at_mask[f]
+                if eam:
+                    for j in srcs:
+                        if source_covers[j][f] & eam:
+                            src_covered = True
                             break
 
             if not goal_covered:
